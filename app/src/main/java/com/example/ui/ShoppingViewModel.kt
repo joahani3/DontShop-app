@@ -32,6 +32,12 @@ class ShoppingViewModel(private val repository: ShoppingRepository) : ViewModel(
             initialValue = emptyList()
         )
 
+    override fun onCleared() {
+        super.onCleared()
+        tickingJob?.cancel()
+        tickingJob = null
+    }
+
     // === UI 네비게이션 탭 상태 ===
     // 0: 대시보드 (통계 + 오늘의 명언)
     // 1: 쇼핑앱 제어 (앱 목록 추가, 사용량 조정, 잠금 설정)
@@ -144,24 +150,28 @@ class ShoppingViewModel(private val repository: ShoppingRepository) : ViewModel(
         _activeApp.value = app
         tickingJob?.cancel()
         tickingJob = viewModelScope.launch {
-            while (true) {
-                kotlinx.coroutines.delay(2000) // 2초마다 1분씩 증가하여 테스트를 원활하게 진행
-                val currentActive = _activeApp.value ?: break
-                
-                val newMinutes = currentActive.usedMinutesToday + 1
-                repository.updateUsedMinutes(currentActive.id, newMinutes)
-                
-                // 최신 데이터 가져와서 업데이트
-                val updated = currentActive.copy(usedMinutesToday = newMinutes)
-                _activeApp.value = updated
-                checkAppLimits(updated)
-                
-                if (newMinutes >= currentActive.dailyLimitMinutes) {
-                    repository.updateAppLockState(currentActive.id, true)
-                    _activeApp.value = null
-                    _warningMessage.value = "🚨 [시간 초과 잠금] ${currentActive.name}의 사용 한도가 다 되어서 세션이 자동으로 차단되었습니다!"
-                    break
+            try {
+                while (true) {
+                    kotlinx.coroutines.delay(2000)
+                    val currentActive = _activeApp.value ?: break
+
+                    val newMinutes = currentActive.usedMinutesToday + 1
+                    repository.updateUsedMinutes(currentActive.id, newMinutes)
+
+                    val updated = currentActive.copy(usedMinutesToday = newMinutes)
+                    _activeApp.value = updated
+                    checkAppLimits(updated)
+
+                    if (newMinutes >= currentActive.dailyLimitMinutes) {
+                        repository.updateAppLockState(currentActive.id, true)
+                        _activeApp.value = null
+                        _warningMessage.value = "🚨 [시간 초과 잠금] ${currentActive.name}의 사용 한도가 다 되어서 세션이 자동으로 차단되었습니다!"
+                        break
+                    }
                 }
+            } catch (e: Exception) {
+                _warningMessage.value = "세션 오류: ${e.message}"
+                _activeApp.value = null
             }
         }
     }
@@ -228,32 +238,61 @@ class ShoppingViewModel(private val repository: ShoppingRepository) : ViewModel(
 
     // 쇼핑앱 추가
     fun addShoppingApp(name: String, limitMinutes: Int, category: String, packageName: String? = null) {
-        viewModelScope.launch {
-            val app = ShoppingApp(
-                name = name,
-                dailyLimitMinutes = limitMinutes,
-                usedMinutesToday = 0,
-                isLocked = false,
-                packageName = packageName ?: "com.custom.${System.currentTimeMillis()}",
-                category = category
-            )
-            repository.insertShoppingApp(app)
+        if (name.isBlank()) {
+            _warningMessage.value = "앱 이름을 입력해주세요!"
+            return
         }
-    }
+        if (limitMinutes <= 0) {
+            _warningMessage.value = "제한 시간은 0보다 커야 합니다!"
+            return
+        }
 
-    // 다중 쇼핑앱 추가
-    fun addShoppingApps(appsList: List<Triple<String, String, String?>>, limitMinutes: Int) {
         viewModelScope.launch {
-            appsList.forEachIndexed { index, (name, category, packageName) ->
+            try {
                 val app = ShoppingApp(
                     name = name,
                     dailyLimitMinutes = limitMinutes,
                     usedMinutesToday = 0,
                     isLocked = false,
-                    packageName = packageName ?: "com.custom.${System.currentTimeMillis()}_${index}",
+                    packageName = packageName ?: "com.custom.${System.currentTimeMillis()}",
                     category = category
                 )
                 repository.insertShoppingApp(app)
+            } catch (e: Exception) {
+                _warningMessage.value = "앱 추가 실패: ${e.message}"
+            }
+        }
+    }
+
+    // 다중 쇼핑앱 추가
+    fun addShoppingApps(appsList: List<Triple<String, String, String?>>, limitMinutes: Int) {
+        if (appsList.isEmpty()) {
+            _warningMessage.value = "추가할 앱이 없습니다!"
+            return
+        }
+        if (limitMinutes <= 0) {
+            _warningMessage.value = "제한 시간은 0보다 커야 합니다!"
+            return
+        }
+
+        viewModelScope.launch {
+            try {
+                appsList.forEachIndexed { index, (name, category, packageName) ->
+                    if (name.isNotBlank()) {
+                        val app = ShoppingApp(
+                            name = name,
+                            dailyLimitMinutes = limitMinutes,
+                            usedMinutesToday = 0,
+                            isLocked = false,
+                            packageName = packageName ?: "com.custom.${System.currentTimeMillis()}_${index}",
+                            category = category
+                        )
+                        repository.insertShoppingApp(app)
+                    }
+                }
+                _warningMessage.value = "앱 ${appsList.size}개 추가 완료!"
+            } catch (e: Exception) {
+                _warningMessage.value = "앱 추가 중 오류: ${e.message}"
             }
         }
     }
@@ -334,17 +373,27 @@ class ShoppingViewModel(private val repository: ShoppingRepository) : ViewModel(
         val name = _brakeItemName.value
         val price = _brakeItemPrice.value.toIntOrNull() ?: 0
         val resolution = if (_userResolutionInput.value.isNotBlank()) _userResolutionInput.value else _selectedResolution.value
-        
+
+        if (name.isBlank() || price <= 0 || resolution.isBlank()) {
+            _warningMessage.value = "필수 정보가 누락되었습니다!"
+            return
+        }
+
         viewModelScope.launch {
-            val record = BlockedImpulse(
-                itemName = name,
-                itemPrice = price,
-                resolutionSelected = resolution,
-                isBlocked = true
-            )
-            repository.insertBlockedImpulse(record)
-            _showBrakeDialog.value = false
-            _showResultDialog.value = true // 참기 성공 팝업 노출
+            try {
+                val record = BlockedImpulse(
+                    itemName = name,
+                    itemPrice = price,
+                    resolutionSelected = resolution,
+                    isBlocked = true
+                )
+                repository.insertBlockedImpulse(record)
+                _showBrakeDialog.value = false
+                _showResultDialog.value = true
+            } catch (e: Exception) {
+                _warningMessage.value = "기록 저장 실패: ${e.message}"
+                _showBrakeDialog.value = false
+            }
         }
     }
 
@@ -353,17 +402,27 @@ class ShoppingViewModel(private val repository: ShoppingRepository) : ViewModel(
         val name = _brakeItemName.value
         val price = _brakeItemPrice.value.toIntOrNull() ?: 0
         val resolution = "다짐을 지키지 못함: " + (if (_userResolutionInput.value.isNotBlank()) _userResolutionInput.value else _selectedResolution.value)
-        
+
+        if (name.isBlank() || price <= 0) {
+            _warningMessage.value = "필수 정보가 누락되었습니다!"
+            return
+        }
+
         viewModelScope.launch {
-            val record = BlockedImpulse(
-                itemName = name,
-                itemPrice = price,
-                resolutionSelected = resolution,
-                isBlocked = false
-            )
-            repository.insertBlockedImpulse(record)
-            _showBrakeDialog.value = false
-            _showResultDialog.value = false // 지름 결과 팝업 노출
+            try {
+                val record = BlockedImpulse(
+                    itemName = name,
+                    itemPrice = price,
+                    resolutionSelected = resolution,
+                    isBlocked = false
+                )
+                repository.insertBlockedImpulse(record)
+                _showBrakeDialog.value = false
+                _showResultDialog.value = false
+            } catch (e: Exception) {
+                _warningMessage.value = "기록 저장 실패: ${e.message}"
+                _showBrakeDialog.value = false
+            }
         }
     }
 

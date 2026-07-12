@@ -24,6 +24,7 @@ abstract class ShoppingDatabase : RoomDatabase() {
                     ShoppingDatabase::class.java,
                     "shopping_stop_database"
                 )
+                .enableWriteAheadLogging()
                 .addCallback(ShoppingDatabaseCallback(coroutineScope))
                 .build()
                 INSTANCE = instance

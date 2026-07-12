@@ -2,10 +2,15 @@ package com.example.ui
 
 object Localization {
     fun t(key: String, isEnglish: Boolean): String {
+        require(key.isNotEmpty()) { "Translation key cannot be empty" }
         return if (isEnglish) {
-            translationsEn[key] ?: key
+            translationsEn[key] ?: key.also {
+                android.util.Log.w("Localization", "Missing translation for key: $key (English)")
+            }
         } else {
-            translationsKo[key] ?: key
+            translationsKo[key] ?: key.also {
+                android.util.Log.w("Localization", "Missing translation for key: $key (Korean)")
+            }
         }
     }
 
