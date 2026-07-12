@@ -1,0 +1,6 @@
+{
+  "name": "쇼핑그만",
+  "description": "쇼핑 앱 목록을 추가하고, 하루 사용 시간을 제한하고, 결제 충동 시 나의 다짐을 적으며 과소비를 멈추게 돕는 아이폰 스타일의 MZ 라이프 앱",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
