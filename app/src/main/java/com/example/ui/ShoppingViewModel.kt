@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlin.random.Random
 import java.util.Locale
 
@@ -34,8 +35,10 @@ class ShoppingViewModel(private val repository: ShoppingRepository) : ViewModel(
 
     override fun onCleared() {
         super.onCleared()
-        tickingJob?.cancel()
-        tickingJob = null
+        runCatching {
+            tickingJob?.cancel()
+            tickingJob = null
+        }
     }
 
     // === UI 네비게이션 탭 상태 ===
@@ -138,6 +141,7 @@ class ShoppingViewModel(private val repository: ShoppingRepository) : ViewModel(
 
     // === 실시간 쇼핑 세션 제어 ===
     private var tickingJob: kotlinx.coroutines.Job? = null
+    private val sessionMutex = Mutex()
 
     private val _activeApp = MutableStateFlow<ShoppingApp?>(null)
     val activeApp: StateFlow<ShoppingApp?> = _activeApp.asStateFlow()
@@ -147,55 +151,77 @@ class ShoppingViewModel(private val repository: ShoppingRepository) : ViewModel(
             _warningMessage.value = "⚠️ [잠금 상태] ${app.name}은(는) 오늘 사용 제한 시간을 초과했거나 잠겨 있습니다!"
             return
         }
-        _activeApp.value = app
-        tickingJob?.cancel()
-        tickingJob = viewModelScope.launch {
-            try {
-                while (true) {
-                    kotlinx.coroutines.delay(2000)
-                    val currentActive = _activeApp.value ?: break
 
-                    val newMinutes = currentActive.usedMinutesToday + 1
-                    repository.updateUsedMinutes(currentActive.id, newMinutes)
+        viewModelScope.launch {
+            sessionMutex.withLock {
+                _activeApp.value = app
+                tickingJob?.cancel()
+                tickingJob = viewModelScope.launch {
+                    try {
+                        val dailyLimit = app.dailyLimitMinutes
 
-                    val updated = currentActive.copy(usedMinutesToday = newMinutes)
-                    _activeApp.value = updated
-                    checkAppLimits(updated)
+                        while (isActive) {
+                            kotlinx.coroutines.delay(2000)
 
-                    if (newMinutes >= currentActive.dailyLimitMinutes) {
-                        repository.updateAppLockState(currentActive.id, true)
+                            val currentActive = _activeApp.value ?: break
+                            if (currentActive.id != app.id) break
+
+                            val newMinutes = currentActive.usedMinutesToday + 1
+                            repository.updateUsedMinutes(currentActive.id, newMinutes)
+
+                            val updated = currentActive.copy(usedMinutesToday = newMinutes)
+                            _activeApp.value = updated
+                            checkAppLimits(updated)
+
+                            if (newMinutes >= dailyLimit) {
+                                repository.updateAppLockState(currentActive.id, true)
+                                _activeApp.value = null
+                                _warningMessage.value = "🚨 [시간 초과 잠금] ${currentActive.name}의 사용 한도가 다 되어서 세션이 자동으로 차단되었습니다!"
+                                break
+                            }
+                        }
+                    } catch (e: Exception) {
+                        _warningMessage.value = "세션 오류: ${e.message}"
                         _activeApp.value = null
-                        _warningMessage.value = "🚨 [시간 초과 잠금] ${currentActive.name}의 사용 한도가 다 되어서 세션이 자동으로 차단되었습니다!"
-                        break
                     }
                 }
-            } catch (e: Exception) {
-                _warningMessage.value = "세션 오류: ${e.message}"
-                _activeApp.value = null
             }
         }
     }
 
     fun addSessionMinuteSimulated() {
         val currentActive = _activeApp.value ?: return
+        val dailyLimit = currentActive.dailyLimitMinutes
+        val appName = currentActive.name
+        val appId = currentActive.id
+
         viewModelScope.launch {
-            val newMinutes = currentActive.usedMinutesToday + 1
-            repository.updateUsedMinutes(currentActive.id, newMinutes)
-            val updated = currentActive.copy(usedMinutesToday = newMinutes)
-            _activeApp.value = updated
-            checkAppLimits(updated)
-            if (newMinutes >= currentActive.dailyLimitMinutes) {
-                repository.updateAppLockState(currentActive.id, true)
-                _activeApp.value = null
-                _warningMessage.value = "🚨 [시간 초과 잠금] ${currentActive.name}의 사용 한도가 다 되어서 세션이 자동으로 차단되었습니다!"
+            try {
+                val newMinutes = currentActive.usedMinutesToday + 1
+                repository.updateUsedMinutes(appId, newMinutes)
+                val updated = currentActive.copy(usedMinutesToday = newMinutes)
+                _activeApp.value = updated
+                checkAppLimits(updated)
+
+                if (newMinutes >= dailyLimit) {
+                    repository.updateAppLockState(appId, true)
+                    _activeApp.value = null
+                    _warningMessage.value = "🚨 [시간 초과 잠금] ${appName}의 사용 한도가 다 되어서 세션이 자동으로 차단되었습니다!"
+                }
+            } catch (e: Exception) {
+                _warningMessage.value = "세션 분 추가 실패: ${e.message}"
             }
         }
     }
 
     fun stopShoppingAppSession() {
-        _activeApp.value = null
-        tickingJob?.cancel()
-        tickingJob = null
+        viewModelScope.launch {
+            sessionMutex.withLock {
+                _activeApp.value = null
+                tickingJob?.cancel()
+                tickingJob = null
+            }
+        }
     }
 
     // === 사용자 설정 상태 (이미지 3 대응) ===
@@ -307,13 +333,21 @@ class ShoppingViewModel(private val repository: ShoppingRepository) : ViewModel(
 
     // 사용 시간 변경 (사용자 시뮬레이션)
     fun simulateAppUsage(app: ShoppingApp, deltaMinutes: Int) {
+        if (deltaMinutes < 0 && app.usedMinutesToday + deltaMinutes < 0) {
+            _warningMessage.value = "사용 시간이 0보다 작을 수 없습니다!"
+            return
+        }
+
         viewModelScope.launch {
-            val newMinutes = (app.usedMinutesToday + deltaMinutes).coerceAtLeast(0)
-            repository.updateUsedMinutes(app.id, newMinutes)
-            
-            // 한도 초과 경고 알림 검사
-            val updatedApp = app.copy(usedMinutesToday = newMinutes)
-            checkAppLimits(updatedApp)
+            try {
+                val newMinutes = (app.usedMinutesToday + deltaMinutes).coerceAtLeast(0)
+                repository.updateUsedMinutes(app.id, newMinutes)
+
+                val updatedApp = app.copy(usedMinutesToday = newMinutes)
+                checkAppLimits(updatedApp)
+            } catch (e: Exception) {
+                _warningMessage.value = "사용 시간 변경 실패: ${e.message}"
+            }
         }
     }
 
@@ -371,11 +405,20 @@ class ShoppingViewModel(private val repository: ShoppingRepository) : ViewModel(
     // 충동구매 참기 완료 (참기 성공!)
     fun confirmBrakeAndSave() {
         val name = _brakeItemName.value
-        val price = _brakeItemPrice.value.toIntOrNull() ?: 0
+        val priceStr = _brakeItemPrice.value
+        val price = priceStr.filter { it.isDigit() }.toIntOrNull() ?: 0
         val resolution = if (_userResolutionInput.value.isNotBlank()) _userResolutionInput.value else _selectedResolution.value
 
-        if (name.isBlank() || price <= 0 || resolution.isBlank()) {
-            _warningMessage.value = "필수 정보가 누락되었습니다!"
+        if (name.isBlank()) {
+            _warningMessage.value = "상품명을 입력해주세요!"
+            return
+        }
+        if (price <= 0) {
+            _warningMessage.value = "올바른 가격을 입력해주세요! (0보다 커야 함)"
+            return
+        }
+        if (resolution.isBlank()) {
+            _warningMessage.value = "다짐을 선택해주세요!"
             return
         }
 
@@ -400,11 +443,17 @@ class ShoppingViewModel(private val repository: ShoppingRepository) : ViewModel(
     // 결국 참지 못하고 결제 (지름 강행)
     fun confirmBrakeAndPurchase() {
         val name = _brakeItemName.value
-        val price = _brakeItemPrice.value.toIntOrNull() ?: 0
-        val resolution = "다짐을 지키지 못함: " + (if (_userResolutionInput.value.isNotBlank()) _userResolutionInput.value else _selectedResolution.value)
+        val priceStr = _brakeItemPrice.value
+        val price = priceStr.filter { it.isDigit() }.toIntOrNull() ?: 0
+        val userInput = _userResolutionInput.value
+        val resolution = "다짐을 지키지 못함: " + (if (userInput.isNotBlank()) userInput else _selectedResolution.value)
 
-        if (name.isBlank() || price <= 0) {
-            _warningMessage.value = "필수 정보가 누락되었습니다!"
+        if (name.isBlank()) {
+            _warningMessage.value = "상품명을 입력해주세요!"
+            return
+        }
+        if (price <= 0) {
+            _warningMessage.value = "올바른 가격을 입력해주세요! (0보다 커야 함)"
             return
         }
 
