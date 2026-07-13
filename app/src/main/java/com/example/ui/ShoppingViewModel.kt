@@ -13,6 +13,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.delay
 import kotlin.random.Random
 import java.util.Locale
 
@@ -160,8 +162,8 @@ class ShoppingViewModel(private val repository: ShoppingRepository) : ViewModel(
                     try {
                         val dailyLimit = app.dailyLimitMinutes
 
-                        while (isActive) {
-                            kotlinx.coroutines.delay(2000)
+                        while (this.isActive) {
+                            delay(2000)
 
                             val currentActive = _activeApp.value ?: break
                             if (currentActive.id != app.id) break
