@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "쇼핑그만"
+rootProject.name = "DontShop"
 
 include(":app")
